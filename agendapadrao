@@ -1,0 +1,213 @@
+import tkinter as tk
+from tkinter import messagebox
+from selenium import webdriver
+from selenium.webdriver.common.by import By
+from selenium.webdriver.support.ui import WebDriverWait
+from selenium.webdriver.support import expected_conditions as EC
+from selenium.webdriver.chrome.options import Options
+from selenium.webdriver.support.ui import Select
+from selenium.common.exceptions import StaleElementReferenceException, TimeoutException, NoSuchElementException
+import pandas as pd
+from openpyxl import load_workbook
+from openpyxl.cell.cell import MergedCell
+from datetime import datetime, timedelta
+import time
+import shutil
+import os
+import locale
+
+# Configura a localidade para português brasileiro
+locale.setlocale(locale.LC_TIME, 'pt_BR.UTF-8')
+
+# Função para obter o intervalo de datas do usuário
+def get_date_range():
+    start_date = None
+    end_date = None
+
+    def on_confirm():
+        nonlocal start_date, end_date
+        start_str = entry_start.get()
+        end_str = entry_end.get()
+        try:
+            start = datetime.strptime(start_str, "%d/%m/%Y")
+            end = datetime.strptime(end_str, "%d/%m/%Y")
+            today = datetime.now().replace(hour=0, minute=0, second=0, microsecond=0)
+            if start < today:
+                raise ValueError("A data inicial não pode ser anterior a hoje.")
+            if end < start:
+                raise ValueError("A data final não pode ser anterior à data inicial.")
+            start_date = start
+            end_date = end
+            root.destroy()
+        except ValueError as e:
+            messagebox.showerror("Erro", str(e))
+
+    root = tk.Tk()
+    root.title("Configuração da Agenda")
+    root.geometry("400x200")
+
+    # Desabilita o fechamento da janela sem confirmação
+    root.protocol("WM_DELETE_WINDOW", lambda: messagebox.showwarning("Aviso", "Por favor, confirme as datas antes de fechar."))
+
+    tk.Label(root, text="Data Inicial (DD/MM/AAAA):").pack(pady=10)
+    entry_start = tk.Entry(root)
+    entry_start.pack(pady=5)
+    entry_start.insert(0, datetime.now().strftime("%d/%m/%Y"))
+
+    tk.Label(root, text="Data Final (DD/MM/AAAA):").pack(pady=10)
+    entry_end = tk.Entry(root)
+    entry_end.pack(pady=5)
+    entry_end.insert(0, datetime.now().strftime("%d/%m/%Y"))
+
+    tk.Button(root, text="Confirmar", command=on_confirm).pack(pady=20)
+
+    root.mainloop()
+
+    if start_date is None or end_date is None:
+        messagebox.showerror("Erro", "Nenhuma configuração válida de datas foi selecionada. O programa será encerrado.")
+        exit(1)
+    return start_date, end_date
+
+# Configura o navegador em modo headless
+chrome_options = Options()
+chrome_options.add_argument("--headless")
+chrome_options.add_argument("--disable-gpu")
+chrome_options.add_argument("--no-sandbox")
+chrome_options.add_argument("--log-level=3")
+
+try:
+    driver = webdriver.Chrome(options=chrome_options)
+    driver.set_window_size(1920, 1080)
+    driver.get("https://agendapib.pibcuritiba.org.br/detalhes/")
+except Exception as e:
+    print(f"Erro ao iniciar o navegador ou acessar a página: {e} ({type(e).__name__})")
+    exit(1)
+
+wait = WebDriverWait(driver, 30)
+
+# Obtém as configurações de intervalo de datas
+start_date, end_date = get_date_range()
+
+# Loop para cada dia no intervalo
+current_date = start_date
+while current_date <= end_date:
+    data_formatada = current_date.strftime("%d/%m/%Y")
+    data_arquivo = current_date.strftime("%d-%m-%Y")
+
+    retries = 3
+    for attempt in range(retries):
+        try:
+            input_data_inicio = wait.until(EC.element_to_be_clickable((By.ID, "dtAgendaI")))
+            input_data_fim = wait.until(EC.element_to_be_clickable((By.ID, "dtAgendaF")))
+            botao = wait.until(EC.element_to_be_clickable((By.CSS_SELECTOR, 'input.btn.btn-primary[type="submit"]')))
+
+            input_data_inicio.clear()
+            input_data_inicio.send_keys(data_formatada)
+            input_data_fim.clear()
+            input_data_fim.send_keys(data_formatada)
+            botao.click()
+
+            time.sleep(5)
+
+            select_element = wait.until(EC.element_to_be_clickable((By.XPATH, "//div[@id='tableCalendar_length']//select")))
+            select = Select(select_element)
+            select.select_by_value("-1")
+
+            time.sleep(5)
+            wait.until(EC.presence_of_element_located((By.CSS_SELECTOR, "#tableCalendar tbody tr")))
+
+            dados = []
+
+            rows = driver.find_elements(By.CSS_SELECTOR, "#tableCalendar tbody tr")
+            for row in rows:
+                try:
+                    cols = row.find_elements(By.TAG_NAME, "td")
+                    if len(cols) >= 8:
+                        Data = cols[0].text.strip()
+                        inicio = cols[1].text.strip()
+                        fim = cols[2].text.strip()
+                        evento = cols[3].text.strip()
+                        sala = cols[4].text.strip()
+                        area = cols[5].text.strip()
+                        som = cols[7].get_attribute("textContent").strip()
+                        if som:  # Inverte a lógica para incluir apenas com "Som" preenchido
+                            dados.append({
+                                'Início': inicio,
+                                'Fim': fim,
+                                'Evento': evento,
+                                'Sala': sala,
+                                'Área': area,
+                                'Som': som,
+                            })
+                except Exception as e:
+                    print(f"Erro ao processar linha: {e}")
+                    continue
+
+            if dados:
+                df = pd.DataFrame(dados)
+
+                modelo = "AGENDA PADRAO.xlsx"
+                if not os.path.exists(modelo):
+                    print(f"Modelo não encontrado: {modelo}")
+                    exit(1)
+
+                novo_arquivo = f"AGENDA_{data_arquivo}.xlsx"
+                shutil.copyfile(modelo, novo_arquivo)
+
+                try:
+                    wb = load_workbook(novo_arquivo)
+                    ws = wb.active
+
+                    # Preenche o cabeçalho com o dia da semana em português
+                    dia_semana = current_date.strftime('%A').capitalize()
+                    data_cabecalho = current_date.strftime('%d/%m')
+                    header_cell = ws.cell(row=1, column=1)
+                    if not isinstance(header_cell, MergedCell):
+                        ws.cell(row=1, column=1).value = f"Agenda {data_cabecalho}({dia_semana})"
+                    else:
+                        print("Aviso: Célula de cabeçalho é mesclada. Ajustando para próxima célula disponível.")
+                        ws.cell(row=1, column=2).value = f"Agenda {data_cabecalho}({dia_semana})"
+
+                    # Preenche os dados a partir da linha 6, evitando células mescladas e pulando a coluna 3
+                    start_row = 6
+                    column_mapping = [1, 2, 4, 5, 6, 7]  # Pula a coluna 3
+                    for idx, row_data in enumerate(dados, start=start_row):
+                        for col_idx, key in enumerate(['Início', 'Fim', 'Evento', 'Sala', 'Área', 'Som']):
+                            cell = ws.cell(row=idx, column=column_mapping[col_idx])
+                            if not isinstance(cell, MergedCell):
+                                cell.value = row_data[key]
+                            else:
+                                print(f"Aviso: Célula em (linha {idx}, coluna {column_mapping[col_idx]}) é mesclada. Pulando.")
+                                next_col = column_mapping[col_idx] + 1
+                                while isinstance(ws.cell(row=idx, column=next_col), MergedCell):
+                                    next_col += 1
+                                ws.cell(row=idx, column=next_col).value = row_data[key]
+
+                    wb.save(novo_arquivo)
+                    print(f"Salvo: {novo_arquivo}")
+                except PermissionError:
+                    print(f"Erro: O arquivo {novo_arquivo} está aberto. Feche-o e tente novamente.")
+                    continue
+                except Exception as e:
+                    print(f"Erro ao salvar o arquivo {novo_arquivo}: {e}")
+                    continue
+            else:
+                print(f"Aviso: Nenhum dado com 'Som' encontrado em {data_formatada}")
+
+            break
+
+        except (StaleElementReferenceException, TimeoutException) as e:
+            if attempt < retries - 1:
+                print(f"Tentativa {attempt + 1} falhou para {data_formatada}: {e}. Tentando novamente...")
+                time.sleep(2)
+                continue
+            else:
+                print(f"Erro ao processar {data_formatada} após {retries} tentativas: {e}")
+                break
+        except Exception as e:
+            print(f"Erro inesperado ao processar {data_formatada}: {e}")
+            break
+
+    current_date += timedelta(days=1)
+
+driver.quit()

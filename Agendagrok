@@ -1,0 +1,126 @@
+from selenium import webdriver
+from selenium.webdriver.common.by import By
+from selenium.webdriver.support.ui import WebDriverWait
+from selenium.webdriver.support import expected_conditions as EC
+from selenium.webdriver.chrome.options import Options
+from selenium.webdriver.support.ui import Select
+from selenium.common.exceptions import StaleElementReferenceException, TimeoutException, NoSuchElementException
+import pandas as pd
+from datetime import datetime, timedelta
+import time
+
+# Configura o navegador em modo headless
+chrome_options = Options()
+chrome_options.add_argument("--headless")
+chrome_options.add_argument("--disable-gpu")
+chrome_options.add_argument("--no-sandbox")
+chrome_options.add_argument("--log-level=3")  # Reduz logs desnecessários
+
+try:
+    driver = webdriver.Chrome(options=chrome_options)
+    driver.set_window_size(1920, 1080)  # Ajusta o tamanho da janela para evitar problemas de viewport
+    driver.get("https://agendapib.pibcuritiba.org.br/detalhes/")
+except Exception as e:
+    print(f"Erro ao iniciar o navegador ou acessar a página: {e}")
+    exit(1)
+
+wait = WebDriverWait(driver, 30)
+
+# Loop pelos próximos 7 dias
+for i in range(7):
+    data_atual = datetime.now() + timedelta(days=i)
+    data_formatada = data_atual.strftime("%d/%m/%Y")
+    data_arquivo = data_atual.strftime("%d-%m-%Y")
+
+    retries = 3
+    for attempt in range(retries):
+        try:
+            # Relocaliza os elementos do formulário
+            input_data_inicio = wait.until(EC.element_to_be_clickable((By.ID, "dtAgendaI")))
+            input_data_fim = wait.until(EC.element_to_be_clickable((By.ID, "dtAgendaF")))
+            botao = wait.until(EC.element_to_be_clickable((By.CSS_SELECTOR, 'input.btn.btn-primary[type="submit"]')))
+
+            # Preenche os dois campos com a mesma data
+            input_data_inicio.clear()
+            input_data_inicio.send_keys(data_formatada)
+            input_data_fim.clear()
+            input_data_fim.send_keys(data_formatada)
+
+            # Clica no botão "Visualizar"
+            botao.click()
+
+            # Aguarda o DOM estabilizar
+            time.sleep(5)
+
+            # Seleciona a opção "All" no campo "Show"
+            show_select = wait.until(EC.presence_of_element_located((By.ID, "tableCalendar_length")))
+            select_element = wait.until(EC.element_to_be_clickable((By.XPATH, "//div[@id='tableCalendar_length']//select")))
+            select = Select(select_element)
+            select.select_by_value("-1")  # "All" tem valor -1
+            print(f"Debug: Selecionada a opção 'All' para {data_formatada}")
+
+            # Aguarda a tabela carregar todas as linhas
+            time.sleep(5)
+            wait.until(EC.presence_of_element_located((By.CSS_SELECTOR, "#tableCalendar tbody tr")))
+
+            # Lista para acumular dados
+            dados = []
+
+            # Extrai os dados da tabela
+            print(f"Debug: Processando dados para {data_formatada}")
+            rows = driver.find_elements(By.CSS_SELECTOR, "#tableCalendar tbody tr")
+            if not rows:
+                print(f"Aviso: Nenhuma linha encontrada na tabela para {data_formatada}")
+            else:
+                print(f"Debug: Encontradas {len(rows)} linhas para {data_formatada}")
+
+            for row in rows:
+                cols = row.find_elements(By.TAG_NAME, "td")
+                if len(cols) >= 8:
+                    Data = cols[0].text.strip()
+                    inicio = cols[1].text.strip()
+                    fim = cols[2].text.strip()
+                    evento = cols[3].text.strip()
+                    sala = cols[4].text.strip()
+                    area = cols[5].text.strip()
+                    som = cols[7].get_attribute("textContent").strip()
+
+                    # Só adiciona eventos com SOM preenchido
+                    if not som:
+                        continue
+
+                    dados.append({
+                        'Data': Data,
+                        'Início': inicio,
+                        'Fim': fim,
+                        'Evento': evento,
+                        'Sala': sala,
+                        'Área': area,
+                        'Som': som,
+                    })
+
+            # Salva os dados em um único arquivo
+            if dados:
+                df = pd.DataFrame(dados)
+                nome_arquivo = f'AGENDA_{data_arquivo}.xlsx'
+                df.to_excel(nome_arquivo, index=False)
+                print(f"Salvo: {nome_arquivo}")
+            else:
+                print(f"Aviso: Nenhum dado com SOM encontrado em {data_formatada}")
+
+            break
+
+        except (StaleElementReferenceException, TimeoutException) as e:
+            if attempt < retries - 1:
+                print(f"Tentativa {attempt + 1} falhou para {data_formatada}: {e}. Tentando novamente...")
+                time.sleep(2)
+                continue
+            else:
+                print(f"Erro ao processar {data_formatada} após {retries} tentativas: {e}")
+                break
+
+        except Exception as e:
+            print(f"Erro inesperado ao processar {data_formatada}: {e}")
+            break
+
+driver.quit()
