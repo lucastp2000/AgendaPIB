@@ -1,0 +1,710 @@
+# Importação de bibliotecas necessárias
+import tkinter as tk
+from tkinter import messagebox
+from tkinter import ttk
+from selenium import webdriver
+from selenium.webdriver.common.by import By
+from selenium.webdriver.support.ui import WebDriverWait
+from selenium.webdriver.support import expected_conditions as EC
+from selenium.webdriver.chrome.options import Options
+from selenium.webdriver.support.ui import Select
+from selenium.common.exceptions import StaleElementReferenceException, TimeoutException, NoSuchElementException
+import pandas as pd
+from openpyxl import load_workbook
+from openpyxl.cell.cell import MergedCell
+from datetime import datetime, timedelta, time
+import time as time_module
+import shutil
+import os
+import locale
+import logging
+from tkcalendar import Calendar
+import json
+from PIL import Image, ImageTk
+
+# Configuração da localidade para usar formatação de data em português brasileiro
+try:
+    locale.setlocale(locale.LC_TIME, 'pt_BR.UTF-8')
+except locale.Error:
+    locale.setlocale(locale.LC_TIME, '')  # Fallback para localidade padrão
+
+# Configuração do logging
+logging.basicConfig(
+    filename='manual_events.log',
+    level=logging.INFO,
+    format='%(asctime)s - %(message)s',
+    datefmt='%Y-%m-%d %H:%M:%S'
+)
+
+# Lista para armazenar eventos manuais
+manual_events = []
+
+# Adicionar evento "Montagem" e "Início:" como padrão
+manual_events.append({
+    'Data': '',
+    'Início': '',
+    'Fim': '',
+    'Evento': '',
+    'Sala': '',
+    'Área': '',
+    'Som': '',
+    'Detalhes de Eventos': 'Montagem:\nInicio:'
+})
+
+# Funções auxiliares para gerenciar eventos padrão
+def load_standard_events():
+    """Carrega eventos padrão do arquivo JSON ou retorna uma lista padrão inicial."""
+    default_events = ["Culto Matutino", "Culto Vespertino", "Reunião de Oração", "Estudo Bíblico"]
+    try:
+        if os.path.exists("eventos_padrao.json"):
+            with open("eventos_padrao.json", "r", encoding="utf-8") as f:
+                events = json.load(f)
+                return events if events else default_events
+        else:
+            return default_events
+    except Exception as e:
+        print(f"Erro ao carregar eventos padrão: {e}")
+        return default_events
+
+def save_standard_events(events):
+    """Salva eventos padrão no arquivo JSON."""
+    try:
+        with open("eventos_padrao.json", "w", encoding="utf-8") as f:
+            json.dump(events, f, indent=2, ensure_ascii=False)
+    except Exception as e:
+        print(f"Erro ao salvar eventos padrão: {e}")
+
+# Função para obter o intervalo de datas do usuário via interface gráfica
+def get_date_range():
+    global manual_events
+    start_date, end_date = None, None
+    start_date_str, end_date_str = None, None
+
+    def open_calendar_start():
+        def select_start_date():
+            nonlocal start_date_str
+            start_date_str = cal.get_date()
+            try:
+                start_dt = datetime.strptime(start_date_str, "%d/%m/%Y")
+                today = datetime.now().replace(hour=0, minute=0, second=0, microsecond=0)
+                if start_dt < today:
+                    raise ValueError("Data inicial não pode ser anterior a hoje.")
+                start_entry.delete(0, tk.END)
+                start_entry.insert(0, start_date_str)
+                start_label.config(text=f"Data Inicial: {start_date_str}")
+                cal_window.destroy()
+            except ValueError as e:
+                messagebox.showerror("Erro", str(e))
+
+        cal_window = tk.Toplevel(root)
+        cal_window.title("Selecionar Data Inicial")
+        cal_window.geometry("300x300")
+        cal_window.resizable(False, False)
+        cal_frame = ttk.Frame(cal_window, padding="10")
+        cal_frame.pack(expand=True, fill="both")
+        today = datetime.now()
+        cal = Calendar(
+            cal_frame,
+            selectmode="day",
+            year=today.year,
+            month=today.month,
+            day=today.day,
+            date_pattern="dd/mm/yyyy",
+            font=("Segoe UI", 10),
+            background="#f0f0f0",
+            foreground="#333333",
+            selectbackground="#0078D7",
+            selectforeground="white"
+        )
+        cal.pack(pady=10)
+        ttk.Button(cal_frame, text="Confirmar", command=select_start_date, style="Accent.TButton").pack(pady=10)
+
+    def open_calendar_end():
+        def select_end_date():
+            nonlocal end_date_str
+            end_date_str = cal.get_date()
+            try:
+                end_dt = datetime.strptime(end_date_str, "%d/%m/%Y")
+                if start_date_str:
+                    start_dt = datetime.strptime(start_date_str, "%d/%m/%Y")
+                    if end_dt < start_dt:
+                        raise ValueError("Data final não pode ser anterior à inicial.")
+                end_entry.delete(0, tk.END)
+                end_entry.insert(0, end_date_str)
+                end_label.config(text=f"Data Final: {end_date_str}")
+                cal_window.destroy()
+            except ValueError as e:
+                messagebox.showerror("Erro", str(e))
+
+        cal_window = tk.Toplevel(root)
+        cal_window.title("Selecionar Data Final")
+        cal_window.geometry("300x300")
+        cal_window.resizable(False, False)
+        cal_frame = ttk.Frame(cal_window, padding="10")
+        cal_frame.pack(expand=True, fill="both")
+        today = datetime.now()
+        cal = Calendar(
+            cal_frame,
+            selectmode="day",
+            year=today.year,
+            month=today.month,
+            day=today.day,
+            date_pattern="dd/mm/yyyy",
+            font=("Segoe UI", 10),
+            background="#f0f0f0",
+            foreground="#333333",
+            selectbackground="#0078D7",
+            selectforeground="white"
+        )
+        cal.pack(pady=10)
+        ttk.Button(cal_frame, text="Confirmar", command=select_end_date, style="Accent.TButton").pack(pady=10)
+
+    def on_confirm():
+        nonlocal start_date, end_date, start_date_str, end_date_str
+        start_date_str = start_entry.get().strip()
+        end_date_str = end_entry.get().strip()
+
+        if not start_date_str or not end_date_str:
+            messagebox.showerror("Erro", "Preencha ou selecione ambas as datas.")
+            return
+
+        try:
+            start_date = datetime.strptime(start_date_str, "%d/%m/%Y")
+            end_date = datetime.strptime(end_date_str, "%d/%m/%Y")
+            today = datetime.now().replace(hour=0, minute=0, second=0, microsecond=0)
+            if start_date < today:
+                raise ValueError("Data inicial não pode ser anterior a hoje.")
+            if end_date < start_date:
+                raise ValueError("Data final não pode ser anterior à inicial.")
+            root.destroy()
+        except ValueError as e:
+            messagebox.showerror("Erro", f"Erro na formatação das datas: {str(e)}. Use DD/MM/AAAA.")
+            return
+
+    def on_cancel():
+        messagebox.showinfo("Cancelamento", "Operação cancelada pelo usuário.")
+        root.destroy()
+        exit(0)
+
+    def open_manual_event_window():
+        event_date_str = ""
+        standard_events = load_standard_events()
+
+        def open_calendar_event():
+            def select_event_date():
+                nonlocal event_date_str
+                event_date_str = cal.get_date()
+                try:
+                    event_dt = datetime.strptime(event_date_str, "%d/%m/%Y")
+                    if start_date_str and end_date_str:
+                        start_dt = datetime.strptime(start_date_str, "%d/%m/%Y")
+                        end_dt = datetime.strptime(end_date_str, "%d/%m/%Y")
+                        if event_dt < start_dt or event_dt > end_dt:
+                            raise ValueError("Data do evento fora do intervalo selecionado.")
+                    event_date_entry.delete(0, tk.END)
+                    event_date_entry.insert(0, event_date_str)
+                    cal_window.destroy()
+                except ValueError as e:
+                    messagebox.showerror("Erro", str(e))
+
+            cal_window = tk.Toplevel(root)
+            cal_window.title("Selecionar Data do Evento")
+            cal_window.geometry("300x300")
+            cal_window.resizable(False, False)
+            cal_frame = ttk.Frame(cal_window, padding="10")
+            cal_frame.pack(expand=True, fill="both")
+            today = datetime.now()
+            cal = Calendar(
+                cal_frame,
+                selectmode="day",
+                year=today.year,
+                month=today.month,
+                day=today.day,
+                date_pattern="dd/mm/yyyy",
+                font=("Segoe UI", 10),
+                background="#f0f0f0",
+                foreground="#333333",
+                selectbackground="#0078D7",
+                selectforeground="white"
+            )
+            cal.pack(pady=10)
+            ttk.Button(cal_frame, text="Confirmar", command=select_event_date, style="Accent.TButton").pack(pady=10)
+
+        def on_event_select(event):
+            selected_event = event_combobox.get()
+            event_name_entry.delete(0, tk.END)
+            event_name_entry.insert(0, selected_event)
+
+        def add_manual_event():
+            nonlocal event_date_str, standard_events
+            event_date_str = event_date_entry.get().strip()
+            start_time = start_time_entry.get().strip()
+            end_time = end_time_entry.get().strip()
+            event_name = event_name_entry.get().strip()
+            room = room_entry.get().strip()
+            area = area_entry.get().strip()
+            sound = sound_entry.get().strip()
+            detalhes = detalhes_entry.get().strip()
+            save_as_standard = save_standard_var.get()
+
+            if not event_date_str:
+                messagebox.showerror("Erro", "O campo 'Data' é obrigatório.")
+                return
+            if not start_time:
+                messagebox.showerror("Erro", "O campo 'Início' é obrigatório.")
+                return
+            if not end_time:
+                messagebox.showerror("Erro", "O campo 'Fim' é obrigatório.")
+                return
+            if not event_name:
+                messagebox.showerror("Erro", "O campo 'Evento' é obrigatório.")
+                return
+
+            try:
+                event_date = datetime.strptime(event_date_str, "%d/%m/%Y")
+                if start_date and end_date and (event_date < start_date or event_date > end_date):
+                    raise ValueError("Data do evento fora do intervalo selecionado.")
+
+                inicio = datetime.strptime(start_time, "%H:%M").time()
+                fim = datetime.strptime(end_time, "%H:%M").time()
+
+                if save_as_standard and event_name and event_name not in standard_events:
+                    standard_events.append(event_name)
+                    save_standard_events(standard_events)
+                    event_combobox['values'] = standard_events
+                    messagebox.showinfo("Sucesso", f"Evento '{event_name}' salvo como padrão.")
+
+                manual_events.append({
+                    'Data': event_date_str,
+                    'Início': start_time,
+                    'Fim': end_time,
+                    'Evento': event_name,
+                    'Sala': room,
+                    'Área': area,
+                    'Som': sound,
+                    'Detalhes de Eventos': detalhes if detalhes else 'Montagem:\nInicio:'
+                })
+                logging.info(f"Evento manual adicionado: Data={event_date_str}, Início={start_time}, Fim={end_time}, Evento={event_name}, Sala={room}, Área={area}, Som={sound}, Detalhes={detalhes}")
+                messagebox.showinfo("Sucesso", f"Evento '{event_name}' adicionado com sucesso!")
+                event_date_entry.delete(0, tk.END)
+                start_time_entry.delete(0, tk.END)
+                end_time_entry.delete(0, tk.END)
+                event_name_entry.delete(0, tk.END)
+                room_entry.delete(0, tk.END)
+                area_entry.delete(0, tk.END)
+                sound_entry.delete(0, tk.END)
+                detalhes_entry.delete(0, tk.END)
+                event_combobox.set("")
+                save_standard_var.set(0)
+                event_date_str = ""
+            except ValueError as e:
+                messagebox.showerror("Erro", f"Erro nos dados do evento: {str(e)}. Use DD/MM/AAAA para data e HH:MM para horários.")
+            except Exception as e:
+                messagebox.showerror("Erro", f"Erro inesperado: {str(e)}")
+
+        manual_window = tk.Toplevel(root)
+        manual_window.title("Adicionar Evento Manual")
+        manual_window.geometry("450x800")
+        manual_window.resizable(False, False)
+
+        # Estilo moderno
+        style = ttk.Style()
+        style.configure("TFrame", background="#f0f0f0")
+        style.configure("TLabel", background="#f0f0f0", foreground="#333333", font=("Segoe UI", 10))
+        style.configure("TButton", font=("Segoe UI", 9), padding=5)
+        style.configure("Accent.TButton", background="#0078D7", foreground="white", font=("Segoe UI", 9, "bold"), padding=5)
+        style.map("Accent.TButton", background=[("active", "#005BB5")])
+        style.configure("TCheckbutton", background="#f0f0f0", font=("Segoe UI", 10))
+        style.configure("TCombobox", font=("Segoe UI", 10))
+
+        main_frame = ttk.Frame(manual_window, padding="20")
+        main_frame.pack(expand=True, fill="both")
+
+        # Data
+        ttk.Label(main_frame, text="Data (DD/MM/AAAA, obrigatório):").pack(pady=5)
+        date_frame = ttk.Frame(main_frame)
+        date_frame.pack(pady=5)
+        event_date_entry = ttk.Entry(date_frame, width=30, font=("Segoe UI", 10))
+        event_date_entry.pack(pady=5)
+        ttk.Button(date_frame, text="📅 Selecionar", command=open_calendar_event, style="Accent.TButton").pack(pady=5)
+
+        # Início
+        ttk.Label(main_frame, text="Início (HH:MM, obrigatório):").pack(pady=5)
+        start_time_entry = ttk.Entry(main_frame, width=30, font=("Segoe UI", 10))
+        start_time_entry.pack(pady=5)
+
+        # Fim
+        ttk.Label(main_frame, text="Fim (HH:MM, obrigatório):").pack(pady=5)
+        end_time_entry = ttk.Entry(main_frame, width=30, font=("Segoe UI", 10))
+        end_time_entry.pack(pady=5)
+
+        # Evento Padrão
+        ttk.Label(main_frame, text="Evento Padrão (opcional):").pack(pady=5)
+        event_combobox = ttk.Combobox(main_frame, values=standard_events, width=27, font=("Segoe UI", 10))
+        event_combobox.pack(pady=5)
+        event_combobox.bind("<<ComboboxSelected>>", on_event_select)
+
+        # Evento
+        ttk.Label(main_frame, text="Evento (obrigatório):").pack(pady=5)
+        event_name_entry = ttk.Entry(main_frame, width=30, font=("Segoe UI", 10))
+        event_name_entry.pack(pady=5)
+
+        # Salvar como padrão
+        save_standard_var = tk.BooleanVar()
+        ttk.Checkbutton(main_frame, text="Salvar como padrão", variable=save_standard_var).pack(pady=5)
+
+        # Sala
+        ttk.Label(main_frame, text="Sala (opcional):").pack(pady=5)
+        room_entry = ttk.Entry(main_frame, width=30, font=("Segoe UI", 10))
+        room_entry.pack(pady=5)
+
+        # Área
+        ttk.Label(main_frame, text="Área (opcional):").pack(pady=5)
+        area_entry = ttk.Entry(main_frame, width=30, font=("Segoe UI", 10))
+        area_entry.pack(pady=5)
+
+        # Som
+        ttk.Label(main_frame, text="Som (opcional):").pack(pady=5)
+        sound_entry = ttk.Entry(main_frame, width=30, font=("Segoe UI", 10))
+        sound_entry.pack(pady=5)
+
+        # Detalhes
+        ttk.Label(main_frame, text="Detalhes de Eventos (opcional):").pack(pady=5)
+        detalhes_entry = ttk.Entry(main_frame, width=30, font=("Segoe UI", 10))
+        detalhes_entry.pack(pady=5)
+
+        # Botão Adicionar
+        ttk.Button(main_frame, text="Adicionar Evento", command=add_manual_event, style="Accent.TButton").pack(pady=20)
+
+    # Configuração da janela principal
+    root = tk.Tk()
+    root.title("Configuração da Agenda")
+    root.geometry("600x650")
+    root.resizable(False, False)
+
+    # Estilo moderno
+    style = ttk.Style()
+    style.theme_use("clam")
+    style.configure("TFrame", background="#f0f0f0")
+    style.configure("TLabel", background="#f0f0f0", foreground="#333333", font=("Segoe UI", 12))
+    style.configure("TButton", font=("Segoe UI", 9), padding=5)
+    style.configure("Accent.TButton", background="#0078D7", foreground="white", font=("Segoe UI", 9, "bold"), padding=5)
+    style.map("Accent.TButton", background=[("active", "#005BB5")])
+    style.configure("TEntry", font=("Segoe UI", 10))
+
+    # Centralizar janela
+    root.update_idletasks()
+    width = root.winfo_width()
+    height = root.winfo_height()
+    x = (root.winfo_screenwidth() // 2) - (width // 2)
+    y = (root.winfo_screenheight() // 2) - (height // 2)
+    root.geometry(f"{width}x{height}+{x}+{y}")
+
+    main_frame = ttk.Frame(root, padding="20")
+    main_frame.pack(expand=True, fill="both")
+
+    # Logo
+    try:
+        img = Image.open("logo_agenda_pib.png")
+        img = img.resize((195, 43), Image.Resampling.LANCZOS)
+        photo = ImageTk.PhotoImage(img)
+        image_label = ttk.Label(main_frame, image=photo, background="#f0f0f0")
+        image_label.image = photo
+        image_label.pack(pady=20)
+    except Exception as e:
+        messagebox.showerror("Erro", f"Não foi possível carregar a imagem 'logo_agenda_pib.png': {str(e)}")
+
+    # Data Inicial
+    ttk.Label(main_frame, text="Data Inicial (DD/MM/AAAA):").pack(pady=5)
+    start_frame = ttk.Frame(main_frame)
+    start_frame.pack(pady=5)
+    start_entry = ttk.Entry(start_frame, width=30, font=("Segoe UI", 10))
+    start_entry.pack(pady=5)
+    ttk.Button(start_frame, text="📅 Selecionar", command=open_calendar_start, style="Accent.TButton").pack(pady=5)
+    start_label = ttk.Label(main_frame, text="Data Inicial: Não selecionada")
+    start_label.pack(pady=5)
+
+    # Data Final
+    ttk.Label(main_frame, text="Data Final (DD/MM/AAAA):").pack(pady=5)
+    end_frame = ttk.Frame(main_frame)
+    end_frame.pack(pady=5)
+    end_entry = ttk.Entry(end_frame, width=30, font=("Segoe UI", 10))
+    end_entry.pack(pady=5)
+    ttk.Button(end_frame, text="📅 Selecionar", command=open_calendar_end, style="Accent.TButton").pack(pady=5)
+    end_label = ttk.Label(main_frame, text="Data Final: Não selecionada")
+    end_label.pack(pady=5)
+
+    # Botão Adicionar Eventos Manuais
+    ttk.Button(main_frame, text="Adicionar Eventos Manuais", command=open_manual_event_window, style="Accent.TButton").pack(pady=20)
+
+    # Botões Confirmar e Cancelar
+    button_frame = ttk.Frame(main_frame)
+    button_frame.pack(pady=20)
+    ttk.Button(button_frame, text="Confirmar", command=on_confirm, style="Accent.TButton").pack(side="left", padx=10)
+    ttk.Button(button_frame, text="Cancelar", command=on_cancel, style="TButton").pack(side="left", padx=10)
+
+    root.protocol("WM_DELETE_WINDOW", lambda: messagebox.showwarning("Aviso", "Use o botão 'Cancelar' ou confirme as datas."))
+    root.mainloop()
+
+    if start_date is None or end_date is None:
+        messagebox.showerror("Erro", "Nenhuma configuração válida de datas selecionada. Encerrando.")
+        exit(1)
+    return start_date, end_date
+
+# Função para preparar as linhas da planilha
+def prepare_rows(ws, dados, manual_events, current_date):
+    periods = {
+        'manhã': {'start_row': 4, 'end_time': time(12, 59), 'last_row': 4, 'count': 0},
+        'tarde': {'start_row': 33, 'start_time': time(13, 0), 'end_time': time(17, 59), 'last_row': 33, 'count': 0},
+        'noite': {'start_row': 64, 'start_time': time(18, 0), 'end_time': time(23, 0), 'last_row': 64, 'count': 0}
+    }
+
+    print(f"Preparando linhas para {current_date.strftime('%d/%m/%Y')}. Dados: {len(dados)}, Eventos manuais: {len(manual_events)}")
+    for d in dados:
+        inicio = datetime.strptime(d['Início'], "%H:%M").time() if d['Início'] else time(0, 0)
+        if time(6, 0) <= inicio <= periods['manhã']['end_time']:
+            periods['manhã']['count'] += 1
+        elif periods['tarde']['start_time'] <= inicio <= periods['tarde']['end_time']:
+            periods['tarde']['count'] += 1
+        elif periods['noite']['start_time'] <= inicio <= periods['noite']['end_time']:
+            periods['noite']['count'] += 1
+
+    current_date_str = current_date.strftime("%d/%m/%Y")
+    for event in manual_events:
+        if event['Data'] == current_date_str or not event['Data']:
+            print(f"Processando evento manual: {event}")
+            inicio = datetime.strptime(event['Início'], "%H:%M").time() if event['Início'] else time(0, 0)
+            if time(6, 0) <= inicio <= periods['manhã']['end_time']:
+                periods['manhã']['count'] += 1
+            elif periods['tarde']['start_time'] <= inicio <= periods['tarde']['end_time']:
+                periods['tarde']['count'] += 1
+            elif periods['noite']['start_time'] <= inicio <= periods['noite']['end_time']:
+                periods['noite']['count'] += 1
+
+    all_events = dados + [e for e in manual_events if not e['Data'] or e['Data'] == current_date_str]
+    all_events = sorted(all_events, key=lambda x: datetime.strptime(x['Início'], "%H:%M").time() if x['Início'] else time(23, 59))
+    print(f"Total de eventos a preencher: {len(all_events)}")
+    column_mapping = [1, 2, 3, 4, 5, 6, 7, 8]  # A, B, C, D, E, F, G, H (H para Responsavel)
+    for i, row_data in enumerate(all_events):
+        print(f"Preenchendo evento: {row_data}")
+        inicio_time_str = row_data['Início'] if row_data.get('Início') else "00:00"
+        try:
+            inicio_time = datetime.strptime(inicio_time_str, "%H:%M").time()
+            for period in ['manhã', 'tarde', 'noite']:
+                if ('start_time' not in periods[period] or inicio_time >= periods[period]['start_time']) and inicio_time <= periods[period]['end_time']:
+                    idx = periods[period]['last_row']
+                    max_attempts = min(10, len(all_events) - i)
+                    attempts = 0
+                    while attempts < max_attempts and (isinstance(ws.cell(row=idx, column=1), MergedCell) or idx > ws.max_row):
+                        idx += 1
+                        attempts += 1
+                    if attempts >= max_attempts:
+                        print(f"Máximo de tentativas atingido para {row_data['Início']} - {row_data['Evento']}. Pulando...")
+                        continue
+                    periods[period]['last_row'] = idx + 1
+                    for col_idx, key in enumerate(['Início', 'Fim', 'Detalhes de Eventos', 'Evento', 'Sala', 'Área', 'Som', 'Responsavel']):
+                        cell = ws.cell(row=idx, column=column_mapping[col_idx]) if column_mapping[col_idx] else None
+                        if cell and not isinstance(cell, MergedCell):
+                            if key == 'Detalhes de Eventos' and row_data.get('Início'):
+                                # Calcular o horário de montagem
+                                inicio_dt = datetime.strptime(row_data['Início'], "%H:%M")
+                                montagem_dt = inicio_dt - timedelta(hours=1)
+                                # Ajustar para evitar horários negativos
+                                if montagem_dt.hour < 0:
+                                    montagem_dt = datetime.combine(datetime.min, time(23, 0)) - timedelta(days=1)
+                                    montagem_dt = montagem_dt.replace(hour=23, minute=0)
+                                montagem_time = montagem_dt.strftime("%H:%M")
+                                # Preencher o campo Detalhes de Eventos
+                                cell.value = f"Montagem: {montagem_time}\nInicio: {row_data['Início']}"
+                                print(f"Preenchido Detalhes de Eventos em linha {idx}: Montagem: {montagem_time}, Inicio: {row_data['Início']}")
+                            elif key == 'Responsavel':
+                                cell.value = "Técnico de Apoio:"
+                                print(f"Preenchido Responsavel em linha {idx}: Técnico de Apoio:")
+                            else:
+                                cell.value = row_data.get(key, "") if key else ""
+                    print(f"Preenchido: {row_data['Início']} - {row_data['Evento']}")
+                    break
+        except ValueError as e:
+            print(f"Erro ao processar horário para {row_data['Início']}: {e}")
+            if 'Detalhes de Eventos' in column_mapping and ws.cell(row=idx, column=column_mapping[2]):
+                ws.cell(row=idx, column=column_mapping[2]).value = "Montagem: Erro\nInicio: Erro"
+                print(f"Erro registrado em linha {idx}: Montagem: Erro, Inicio: Erro")
+
+# Função para atualizar a barra de progresso
+def update_progress(progress_window, progress_bar, status_label, current, total, message):
+    progress = (current / total) * 100
+    progress_bar['value'] = progress
+    status_label.config(text=f"Progresso: {message} ({current}/{total})")
+    progress_window.update()
+
+# Configuração inicial do navegador e execução principal
+chrome_options = Options()
+chrome_options.add_argument("--headless")
+chrome_options.add_argument("--disable-gpu")
+chrome_options.add_argument("--no-sandbox")
+chrome_options.add_argument("--log-level=3")
+
+try:
+    driver = webdriver.Chrome(options=chrome_options)
+    driver.set_window_size(1920, 1080)
+    driver.get("https://agendapib.pibcuritiba.org.br/detalhes/")
+    print("Navegador iniciado e página acessada.")
+except Exception as e:
+    print(f"Erro ao iniciar o navegador ou acessar a página: {e} ({type(e).__name__})")
+    exit(1)
+
+wait = WebDriverWait(driver, 30)
+start_date, end_date = get_date_range()
+print(f"Intervalo de datas: {start_date.strftime('%d/%m/%Y')} a {end_date.strftime('%d/%m/%Y')}")
+
+progress_window = tk.Toplevel()
+progress_window.title("Progresso da Geração da Agenda")
+progress_window.geometry("400x120")
+progress_window.resizable(False, False)
+
+progress_window.update_idletasks()
+width = progress_window.winfo_width()
+height = progress_window.winfo_height()
+x = (progress_window.winfo_screenwidth() // 2) - (width // 2)
+y = (progress_window.winfo_screenheight() // 2) - (height // 2)
+progress_window.geometry(f"{width}x{height}+{x}+{y}")
+
+progress_frame = ttk.Frame(progress_window, padding="10")
+progress_frame.pack(expand=True)
+progress_bar = ttk.Progressbar(progress_frame, length=300, mode="determinate")
+progress_bar.pack(pady=10)
+status_label = tk.Label(progress_frame, text="Progresso: Iniciando...", justify="center")
+status_label.pack(pady=5)
+
+total_days = (end_date - start_date).days + 1
+current_day = 0
+
+current_date = start_date
+while current_date <= end_date:
+    data_formatada = current_date.strftime("%d/%m/%Y")
+    data_arquivo = current_date.strftime("%d.%m")
+    dias = ['SEG', 'TER', 'QUA', 'QUI', 'SEX', 'SAB', 'DOM']
+    dia_semana_abrev = dias[current_date.weekday()]
+    novo_arquivo = f"AGENDA {data_arquivo}({dia_semana_abrev})"
+    current_day += 1
+    update_progress(progress_window, progress_bar, status_label, current_day, total_days, f"Processando {data_formatada}")
+
+    retries = 3
+    for attempt in range(retries):
+        try:
+            print(f"Tentativa {attempt + 1} para {data_formatada}")
+            input_data_inicio = wait.until(EC.element_to_be_clickable((By.ID, "dtAgendaI")))
+            input_data_fim = wait.until(EC.element_to_be_clickable((By.ID, "dtAgendaF")))
+            botao = wait.until(EC.element_to_be_clickable((By.CSS_SELECTOR, 'input.btn.btn-primary[type="submit"]')))
+
+            input_data_inicio.clear()
+            input_data_inicio.send_keys(data_formatada)
+            input_data_fim.clear()
+            input_data_fim.send_keys(data_formatada)
+            botao.click()
+            update_progress(progress_window, progress_bar, status_label, current_day, total_days, f"Submetendo formulário para {data_formatada}")
+            print("Formulário submetido.")
+
+            time_module.sleep(20)
+            select_element = wait.until(EC.element_to_be_clickable((By.XPATH, "//div[@id='tableCalendar_length']//select")))
+            select = Select(select_element)
+            select.select_by_value("-1")
+            update_progress(progress_window, progress_bar, status_label, current_day, total_days, f"Ajustando filtro para {data_formatada}")
+            print("Filtro de exibição ajustado.")
+
+            time_module.sleep(20)
+            wait.until(EC.presence_of_element_located((By.CSS_SELECTOR, "#tableCalendar tbody tr")))
+            update_progress(progress_window, progress_bar, status_label, current_day, total_days, f"Carregando tabela para {data_formatada}")
+            print("Tabela carregada.")
+
+            dados = []
+            table = driver.find_element(By.CSS_SELECTOR, "#tableCalendar tbody")
+            rows = driver.find_elements(By.CSS_SELECTOR, "#tableCalendar tbody tr")
+            print(f"Número de linhas encontradas: {len(rows)}")
+            for row in rows:
+                try:
+                    cols = row.find_elements(By.TAG_NAME, "td")
+                    if len(cols) >= 8:
+                        Data = cols[0].text.strip()
+                        inicio = cols[1].text.strip()
+                        fim = cols[2].text.strip()
+                        evento = cols[3].text.strip()
+                        sala = cols[4].text.strip()
+                        area = cols[5].text.strip()
+                        som = cols[7].get_attribute("textContent").strip()
+                        if som and som != "":
+                            print(f"Dado coletado: {inicio} - {evento} - {som}")
+                            dados.append({
+                                'Início': inicio,
+                                'Fim': fim,
+                                'Evento': evento,
+                                'Sala': sala,
+                                'Área': area,
+                                'Som': som,
+                            })
+                except Exception as e:
+                    print(f"Erro ao processar linha: {e}")
+                    continue
+
+            print(f"Dados coletados: {dados}")
+            if not dados:
+                print(f"Nenhum evento com 'Som' encontrado para {data_formatada}. Pulando...")
+                break
+
+            modelo = "AGENDA_PADRAO.xlsx"
+            if not os.path.exists(modelo):
+                print(f"Modelo não encontrado: {modelo}")
+                exit(1)
+
+            temp_arquivo = f"{novo_arquivo}_temp.xlsx"
+            shutil.copyfile(modelo, temp_arquivo)
+            update_progress(progress_window, progress_bar, status_label, current_day, total_days, f"Copiando modelo para {data_formatada}")
+            print(f"Modelo copiado para {temp_arquivo}")
+
+            try:
+                wb = load_workbook(temp_arquivo)
+                ws = wb.active
+                print(f"Planilha aberta. Linhas antes do preenchimento: {ws.max_row}")
+
+                header_cell = ws.cell(row=1, column=1)
+                if not isinstance(header_cell, MergedCell):
+                    ws.cell(row=1, column=1).value = novo_arquivo
+                update_progress(progress_window, progress_bar, status_label, current_day, total_days, f"Preenchendo cabeçalho para {data_formatada}")
+                print(f"Cabeçalho preenchido: {novo_arquivo}")
+
+                prepare_rows(ws, dados, manual_events, current_date)
+                print(f"Linhas após preenchimento: {ws.max_row}")
+
+                wb.save(temp_arquivo)
+                os.replace(temp_arquivo, f"{novo_arquivo}.xlsx")
+                update_progress(progress_window, progress_bar, status_label, current_day, total_days, f"Salvando arquivo para {data_formatada}")
+                print(f"Arquivo salvo: {novo_arquivo}.xlsx")
+            except PermissionError:
+                print(f"Erro: O arquivo {novo_arquivo}.xlsx está aberto no Excel. Feche o arquivo e tente novamente ou aguarde 10 segundos.")
+                time_module.sleep(10)
+                os.remove(temp_arquivo) if os.path.exists(temp_arquivo) else None
+                continue
+            except Exception as e:
+                print(f"Erro ao salvar o arquivo {novo_arquivo}.xlsx: {type(e).__name__} - {str(e)}")
+                os.remove(temp_arquivo) if os.path.exists(temp_arquivo) else None
+                continue
+            finally:
+                os.remove(temp_arquivo) if os.path.exists(temp_arquivo) else None
+
+            break
+
+        except (StaleElementReferenceException, TimeoutException) as e:
+            if attempt < retries - 1:
+                print(f"Tentativa {attempt + 1} falhou para {data_formatada}: {e}. Tentando novamente...")
+                time_module.sleep(5)
+                continue
+            print(f"Erro ao processar {data_formatada} após {retries} tentativas: {e}")
+            break
+        except Exception as e:
+            print(f"Erro inesperado ao processar {data_formatada}: {e}")
+            break
+
+    current_date += timedelta(days=1)
+
+progress_window.destroy()
+print("Script finalizado.")
